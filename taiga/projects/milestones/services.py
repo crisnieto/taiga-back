@@ -5,6 +5,9 @@
 #
 # Copyright (c) 2021-present Kaleidos INC
 
+import logging
+from typing import List, Dict, Any, Optional
+
 from taiga.base.utils import db
 from taiga.events import events
 from taiga.projects.history.services import take_snapshot
@@ -13,8 +16,19 @@ from taiga.projects.issues.models import Issue
 from taiga.projects.tasks.models import Task
 from taiga.projects.userstories.models import UserStory
 
+logger = logging.getLogger(__name__)
 
-def calculate_milestone_is_closed(milestone):
+
+def calculate_milestone_is_closed(milestone) -> bool:
+    """
+    Calculate if a milestone should be considered closed.
+
+    A milestone is closed when all its user stories, tasks (without user story),
+    and issues are closed.
+
+    :param milestone: Milestone instance to check.
+    :return: True if milestone should be closed, False otherwise.
+    """
     all_us_closed = all([user_story.is_closed for user_story in
                          milestone.user_stories.all()])
     all_tasks_closed = all([task.status is not None and task.status.is_closed for task in
@@ -32,23 +46,44 @@ def calculate_milestone_is_closed(milestone):
     return uss_check or issues_check or tasks_check
 
 
-def close_milestone(milestone):
+def close_milestone(milestone) -> bool:
+    """
+    Close a milestone if it's not already closed.
+
+    :param milestone: Milestone instance to close.
+    :return: True if milestone was closed, False if it was already closed.
+    """
     if not milestone.closed:
         milestone.closed = True
         milestone.save(update_fields=["closed",])
+        logger.info("Milestone %s closed", milestone.id)
+        return True
+    return False
 
-def open_milestone(milestone):
+
+def open_milestone(milestone) -> bool:
+    """
+    Open a milestone if it's currently closed.
+
+    :param milestone: Milestone instance to open.
+    :return: True if milestone was opened, False if it was already open.
+    """
     if milestone.closed:
         milestone.closed = False
         milestone.save(update_fields=["closed",])
+        logger.info("Milestone %s opened", milestone.id)
+        return True
+    return False
 
 
-def update_userstories_milestone_in_bulk(bulk_data: list, milestone: object):
+def update_userstories_milestone_in_bulk(bulk_data: List[Dict[str, Any]], milestone: object) -> Dict[int, Any]:
     """
     Update the milestone and the milestone order of some user stories adding
     the extra orders needed to keep consistency.
-    `bulk_data` should be a list of dicts with the following format:
-    [{'us_id': <value>, 'order': <value>}, ...]
+
+    :param bulk_data: List of dicts with format [{'us_id': <value>, 'order': <value>}, ...].
+    :param milestone: Milestone instance to assign user stories to.
+    :return: Dictionary mapping user story IDs to their new sprint orders.
     """
     user_stories = milestone.user_stories.all()
     us_orders = {us.id: getattr(us, "sprint_order") for us in user_stories}
@@ -86,21 +121,30 @@ def update_userstories_milestone_in_bulk(bulk_data: list, milestone: object):
     return us_orders
 
 
-def snapshot_userstories_in_bulk(bulk_data, user):
+def snapshot_userstories_in_bulk(bulk_data: List[Dict[str, Any]], user) -> None:
+    """
+    Create snapshots for multiple user stories in bulk.
+
+    :param bulk_data: List of dicts containing 'us_id' keys.
+    :param user: User instance creating the snapshots.
+    """
     for us_data in bulk_data:
         try:
             us = UserStory.objects.get(pk=us_data['us_id'])
             take_snapshot(us, user=user)
         except UserStory.DoesNotExist:
+            logger.warning("User story %s not found for snapshot", us_data.get('us_id'))
             pass
 
 
-def update_tasks_milestone_in_bulk(bulk_data: list, milestone: object):
+def update_tasks_milestone_in_bulk(bulk_data: List[Dict[str, Any]], milestone: object) -> Dict[int, int]:
     """
     Update the milestone and the milestone order of some tasks adding
     the extra orders needed to keep consistency.
-    `bulk_data` should be a list of dicts with the following format:
-    [{'task_id': <value>, 'order': <value>}, ...]
+
+    :param bulk_data: List of dicts with format [{'task_id': <value>, 'order': <value>}, ...].
+    :param milestone: Milestone instance to assign tasks to.
+    :return: Dictionary mapping task IDs to milestone IDs.
     """
     tasks = milestone.tasks.all()
     task_orders = {task.id: getattr(task, "taskboard_order") for task in tasks}
@@ -134,20 +178,29 @@ def update_tasks_milestone_in_bulk(bulk_data: list, milestone: object):
     return task_milestones
 
 
-def snapshot_tasks_in_bulk(bulk_data, user):
+def snapshot_tasks_in_bulk(bulk_data: List[Dict[str, Any]], user) -> None:
+    """
+    Create snapshots for multiple tasks in bulk.
+
+    :param bulk_data: List of dicts containing 'task_id' keys.
+    :param user: User instance creating the snapshots.
+    """
     for task_data in bulk_data:
         try:
             task = Task.objects.get(pk=task_data['task_id'])
             take_snapshot(task, user=user)
         except Task.DoesNotExist:
+            logger.warning("Task %s not found for snapshot", task_data.get('task_id'))
             pass
 
 
-def update_issues_milestone_in_bulk(bulk_data: list, milestone: object):
+def update_issues_milestone_in_bulk(bulk_data: List[Dict[str, Any]], milestone: object) -> Dict[int, int]:
     """
-    Update the milestone some issues adding
-    `bulk_data` should be a list of dicts with the following format:
-    [{'task_id': <value>}, ...]
+    Update the milestone for some issues.
+
+    :param bulk_data: List of dicts with format [{'issue_id': <value>}, ...].
+    :param milestone: Milestone instance to assign issues to.
+    :return: Dictionary mapping issue IDs to milestone IDs.
     """
     issue_milestones = {e["issue_id"]: milestone.id for e in bulk_data}
     issue_ids = issue_milestones.keys()
@@ -168,10 +221,17 @@ def update_issues_milestone_in_bulk(bulk_data: list, milestone: object):
     return issue_milestones
 
 
-def snapshot_issues_in_bulk(bulk_data, user):
+def snapshot_issues_in_bulk(bulk_data: List[Dict[str, Any]], user) -> None:
+    """
+    Create snapshots for multiple issues in bulk.
+
+    :param bulk_data: List of dicts containing 'issue_id' keys.
+    :param user: User instance creating the snapshots.
+    """
     for issue_data in bulk_data:
         try:
             issue = Issue.objects.get(pk=issue_data['issue_id'])
             take_snapshot(issue, user=user)
         except Issue.DoesNotExist:
+            logger.warning("Issue %s not found for snapshot", issue_data.get('issue_id'))
             pass
