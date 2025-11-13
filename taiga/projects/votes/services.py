@@ -5,7 +5,10 @@
 #
 # Copyright (c) 2021-present Kaleidos INC
 
-from django.db.models import F
+import logging
+from typing import Optional, Any
+
+from django.db.models import F, QuerySet
 from django.db import transaction as tx
 
 from django.apps import apps
@@ -15,95 +18,120 @@ from django_pglocks import advisory_lock
 
 from .models import Votes, Vote
 
+logger = logging.getLogger(__name__)
+
 
 @tx.atomic
-def add_vote(obj, user):
-    """Add a vote to an object.
+def add_vote(obj: Any, user) -> Optional[Vote]:
+    """
+    Add a vote to an object.
 
-    If the user has already voted the object nothing happends, so this function can be considered
+    If the user has already voted the object nothing happens, so this function can be considered
     idempotent.
 
     :param obj: Any Django model instance.
     :param user: User adding the vote. :class:`~taiga.users.models.User` instance.
+    :return: Vote instance if created, None if vote already existed.
     """
     obj_type = apps.get_model("contenttypes", "ContentType").objects.get_for_model(obj)
-    with advisory_lock("vote-{}-{}".format(obj_type.id, obj.id)):
-        vote, created = Vote.objects.get_or_create(content_type=obj_type, object_id=obj.id, user=user)
+    lock_key = "vote-{}-{}".format(obj_type.id, obj.id)
+    
+    with advisory_lock(lock_key):
+        vote, created = Vote.objects.get_or_create(
+            content_type=obj_type,
+            object_id=obj.id,
+            user=user
+        )
         if not created:
-            return
+            logger.debug("User %s already voted for object %s:%s", user.id, obj_type.model, obj.id)
+            return None
 
         votes, _ = Votes.objects.get_or_create(content_type=obj_type, object_id=obj.id)
         votes.count = F('count') + 1
         votes.save()
+        logger.info("User %s voted for object %s:%s", user.id, obj_type.model, obj.id)
         return vote
 
 
 @tx.atomic
-def remove_vote(obj, user):
-    """Remove an user vote from an object.
+def remove_vote(obj: Any, user) -> bool:
+    """
+    Remove a user vote from an object.
 
     If the user has not voted the object nothing happens so this function can be considered
     idempotent.
 
     :param obj: Any Django model instance.
-    :param user: User removing her vote. :class:`~taiga.users.models.User` instance.
+    :param user: User removing their vote. :class:`~taiga.users.models.User` instance.
+    :return: True if vote was removed, False if user hadn't voted.
     """
     obj_type = apps.get_model("contenttypes", "ContentType").objects.get_for_model(obj)
-    with advisory_lock("vote-{}-{}".format(obj_type.id, obj.id)):
+    lock_key = "vote-{}-{}".format(obj_type.id, obj.id)
+    
+    with advisory_lock(lock_key):
         qs = Vote.objects.filter(content_type=obj_type, object_id=obj.id, user=user)
         if not qs.exists():
-            return
+            logger.debug("User %s has not voted for object %s:%s", user.id, obj_type.model, obj.id)
+            return False
 
-    qs.delete()
+        qs.delete()
 
-    votes, _ = Votes.objects.get_or_create(content_type=obj_type, object_id=obj.id)
-    votes.count = F('count') - 1
-    votes.save()
+        votes, _ = Votes.objects.get_or_create(content_type=obj_type, object_id=obj.id)
+        votes.count = F('count') - 1
+        votes.save()
+        logger.info("User %s removed vote from object %s:%s", user.id, obj_type.model, obj.id)
+        return True
 
 
-def get_voters(obj):
-    """Get the voters of an object.
+def get_voters(obj: Any) -> QuerySet:
+    """
+    Get the voters of an object.
 
     :param obj: Any Django model instance.
-
     :return: User queryset object representing the users that voted the object.
     """
     obj_type = apps.get_model("contenttypes", "ContentType").objects.get_for_model(obj)
     return get_user_model().objects.filter(votes__content_type=obj_type, votes__object_id=obj.id)
 
 
-def get_votes(obj):
-    """Get the number of votes an object has.
+def get_votes(obj: Any) -> int:
+    """
+    Get the number of votes an object has.
 
     :param obj: Any Django model instance.
-
     :return: Number of votes or `0` if the object has no votes at all.
     """
     obj_type = apps.get_model("contenttypes", "ContentType").objects.get_for_model(obj)
 
     try:
-        return Votes.objects.get(content_type=obj_type, object_id=obj.id).count
+        votes = Votes.objects.get(content_type=obj_type, object_id=obj.id)
+        return votes.count
     except Votes.DoesNotExist:
         return 0
 
 
-def get_voted(user_or_id, model):
-    """Get the objects voted by an user.
+def get_voted(user_or_id: Any, model: Any) -> QuerySet:
+    """
+    Get the objects voted by a user.
 
-    :param user_or_id: :class:`~taiga.users.models.User` instance or id.
+    :param user_or_id: :class:`~taiga.users.models.User` instance or user id.
     :param model: Show only objects of this kind. Can be any Django model class.
-
     :return: Queryset of objects representing the votes of the user.
     """
     obj_type = apps.get_model("contenttypes", "ContentType").objects.get_for_model(model)
-    conditions = ('votes_vote.content_type_id = %s',
-                  '%s.id = votes_vote.object_id' % model._meta.db_table,
-                  'votes_vote.user_id = %s')
+    conditions = (
+        'votes_vote.content_type_id = %s',
+        '%s.id = votes_vote.object_id' % model._meta.db_table,
+        'votes_vote.user_id = %s'
+    )
 
     if isinstance(user_or_id, get_user_model()):
         user_id = user_or_id.id
     else:
         user_id = user_or_id
 
-    return model.objects.extra(where=conditions, tables=('votes_vote',),
-                               params=(obj_type.id, user_id))
+    return model.objects.extra(
+        where=conditions,
+        tables=('votes_vote',),
+        params=(obj_type.id, user_id)
+    )

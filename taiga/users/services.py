@@ -8,7 +8,9 @@
 """
 This model contains a domain logic for users application.
 """
+import logging
 from io import StringIO
+from typing import Optional, Dict, Any, List, Set
 import csv
 import os
 import uuid
@@ -17,7 +19,7 @@ import zipfile
 from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.core.files.storage import default_storage
-from django.db.models import OuterRef, Q, Subquery
+from django.db.models import OuterRef, Q, Subquery, QuerySet
 from django.db import connection
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
@@ -32,8 +34,17 @@ from taiga.base.utils.urls import get_absolute_url
 from taiga.projects.notifications.choices import NotifyLevel
 from taiga.projects.notifications.services import get_projects_watched
 
+logger = logging.getLogger(__name__)
 
-def get_user_by_username_or_email(username_or_email):
+
+def get_user_by_username_or_email(username_or_email: str):
+    """
+    Get a user by username or email address.
+
+    :param username_or_email: Username or email address to search for.
+    :return: User instance matching the username or email.
+    :raises exc.WrongArguments: If no user is found with the given username or email.
+    """
     user_model = get_user_model()
     qs = user_model.objects.filter(Q(username__iexact=username_or_email) |
                                    Q(email__iexact=username_or_email))
@@ -43,59 +54,98 @@ def get_user_by_username_or_email(username_or_email):
                        Q(email=username_or_email))
 
     if len(qs) == 0:
+        logger.warning("User not found: %s", username_or_email)
         raise exc.WrongArguments(_("Username or password does not matches user."))
 
     user = qs[0]
     return user
 
 
-def get_and_validate_user(*, username: str, password: str) -> bool:
+def get_and_validate_user(*, username: str, password: str):
     """
-    Check if user with username/email exists and specified
-    password matchs well with existing user password.
+    Get and validate a user by username/email and password.
 
-    if user is valid,  user is returned else, corresponding
-    exception is raised.
+    :param username: Username or email address of the user.
+    :param password: Password to validate.
+    :return: User instance if credentials are valid.
+    :raises exc.WrongArguments: If user is not found, password is incorrect,
+                                user is inactive, or user is a system user.
     """
-
     user = get_user_by_username_or_email(username)
-    if not user.check_password(password) or not user.is_active or user.is_system:
+    if not user.check_password(password):
+        logger.warning("Invalid password for user: %s", username)
+        raise exc.WrongArguments(_("Username or password does not matches user."))
+    
+    if not user.is_active:
+        logger.warning("Inactive user attempted login: %s", username)
+        raise exc.WrongArguments(_("Username or password does not matches user."))
+    
+    if user.is_system:
+        logger.warning("System user attempted login: %s", username)
         raise exc.WrongArguments(_("Username or password does not matches user."))
 
     return user
 
 
-def get_photo_url(photo):
-    """Get a photo absolute url and the photo automatically cropped."""
+def get_photo_url(photo) -> Optional[str]:
+    """
+    Get a photo absolute URL with automatic cropping.
+
+    :param photo: Photo file object.
+    :return: Absolute URL of the cropped photo, or None if photo is invalid or missing.
+    """
     if not photo:
         return None
     try:
         url = get_thumbnailer(photo)[settings.THN_AVATAR_SMALL].url
         return get_absolute_url(url)
     except InvalidImageFormatError as e:
+        logger.debug("Invalid image format for photo: %s", str(e))
+        return None
+    except Exception as e:
+        logger.warning("Error generating photo URL: %s", str(e))
         return None
 
 
-def get_user_photo_url(user):
-    """Get the user's photo url."""
+def get_user_photo_url(user) -> Optional[str]:
+    """
+    Get the user's photo URL.
+
+    :param user: User instance.
+    :return: Absolute URL of the user's photo, or None if user or photo is missing.
+    """
     if not user:
         return None
     return get_photo_url(user.photo)
 
 
-def get_big_photo_url(photo):
-    """Get a big photo absolute url and the photo automatically cropped."""
+def get_big_photo_url(photo) -> Optional[str]:
+    """
+    Get a big photo absolute URL with automatic cropping.
+
+    :param photo: Photo file object.
+    :return: Absolute URL of the cropped big photo, or None if photo is invalid or missing.
+    """
     if not photo:
         return None
     try:
         url = get_thumbnailer(photo)[settings.THN_AVATAR_BIG].url
         return get_absolute_url(url)
     except InvalidImageFormatError as e:
+        logger.debug("Invalid image format for big photo: %s", str(e))
+        return None
+    except Exception as e:
+        logger.warning("Error generating big photo URL: %s", str(e))
         return None
 
 
-def get_user_big_photo_url(user):
-    """Get the user's big photo url."""
+def get_user_big_photo_url(user) -> Optional[str]:
+    """
+    Get the user's big photo URL.
+
+    :param user: User instance.
+    :return: Absolute URL of the user's big photo, or None if user or photo is missing.
+    """
     if not user:
         return None
     return get_big_photo_url(user.photo)
